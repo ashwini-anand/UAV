@@ -22,10 +22,22 @@ globals[
   ;Flight Manager beliefs
   B_FM-next-waypoint
   B_FM-power
+
+
+  ;Payload agent belief
+  B_PL-image
+
+  ;communication link agent beliefs
+  B_CL-data
+  B_CL-image
+  B_CL-down
+
   ;will add other beliefs of FM later
 
   ;other variables
   total-waypoints
+  image-count
+  altitude
 
 
 ]
@@ -36,13 +48,17 @@ breed [UAVMISSIONMANAGERS  missionManager]
 breed [UAVFLIGHTCONTROLS  flightControl]
 breed [UAVFLIGHTMANAGERS  flightManager]
 breed [UAVNAVIGATIONSENSORS  navigationSensor]
-
+breed [UAVCOMMUNICATIONLINKS  communicationLink]
+breed [UAVPAYLOADS  payload]
 
 
 to setup
 
   clear-all
+  reset-ticks
   import-drawing "terrain 1.png" ; importing image
+  set B_CL-down false
+  set altitude 20
   set total-waypoints 6
   set-MM-Path-xcor-list
   set-MM-Path-ycor-list
@@ -63,26 +79,35 @@ end
 
 to setup-Agents
 
-  create-UAVMISSIONMANAGERS 1[
+  create-UAVMISSIONMANAGERS 1[             ; missionManager is agent number 7
     set shape "dot"
     hide-turtle
   ]
 
-  create-UAVFLIGHTCONTROLS 1[
+  create-UAVFLIGHTCONTROLS 1[             ; flightControl is agent number 8
     set shape "dot"
     hide-turtle
   ]
 
-  create-UAVFLIGHTMANAGERS 1[
+  create-UAVFLIGHTMANAGERS 1[             ; flightManager is agent number 9
     set shape "dot"
     hide-turtle
   ]
 
-  create-UAVNAVIGATIONSENSORS 1[
+  create-UAVNAVIGATIONSENSORS 1[             ; navigationSensor is agent number 10
     set shape "dot"
     hide-turtle
   ]
 
+  create-UAVCOMMUNICATIONLINKS 1[             ; communicationLink is agent number 11
+    set shape "dot"
+    hide-turtle
+  ]
+
+  create-UAVPAYLOADS 1[             ; payload is agent number 12
+    set shape "dot"
+    hide-turtle
+  ]
 end
 
 
@@ -158,7 +183,7 @@ to go
   ]
   let at-Waypoint 0
 
-  ;repeat until UAV reaches end point. End point in this case is waypoint 0 (same as starting point).
+  ;repeat until UAV reaches end point. End point in this case is waypoint 1 (same as starting point).
   while[ end-point != true][
 
     ask flightManager 9[
@@ -205,8 +230,76 @@ to go
 
       ;move UAV to next waypoint
       ask uav 0[
-        fd 1
-        while[abs (xcor - (item (B_FM-next-waypoint - 1) B_FM-path-xcor-list)) > 0.1 or abs (ycor - (item (B_FM-next-waypoint - 1) B_FM-path-ycor-list)) > 0.1][fd .1]
+        ;fd 1
+        while[abs (xcor - (item (B_FM-next-waypoint - 1) B_FM-path-xcor-list)) > 0.1 or abs (ycor - (item (B_FM-next-waypoint - 1) B_FM-path-ycor-list)) > 0.1][
+          fd .1
+          plot altitude
+          ask payload 12[
+
+            ;check for communicationLink failure
+            ; communication link is up
+            ifelse(communicationLink-failure = false)[
+              take-image  ; move it up
+              send-image-to-communicatioLink
+             ; set B_CL-down false  ; no need
+            ]
+            [
+              ; if communicationLink failed and control is entering here for first time (checked using B_CL-down belief)
+              if(B_CL-down = false)[
+                ask flightManager 9[
+                  raiseUp-and-find-commLink communicationLink-failure-permanent
+                ]
+              ]
+
+              ;check if onboard hard disk is present in case of failure or not
+              ;onboard hard disk is present
+              ifelse(onboard-disk-present)[
+
+                ;onboard hard disk is present and failure is permanent
+                ifelse(communicationLink-failure-permanent)[
+                  if(B_CL-down = false)[set image-count (image-count - 1)]
+                  set B_CL-down true
+                  take-image
+                  move-image-to-disk
+
+                ]
+                ;onboard hard disk is present and failure is temporary
+                [
+                  set communicationLink-failure false
+                  set B_CL-down false
+                ]
+
+              ]
+
+              ;onboard hard disk is not present
+              [
+                ;onboard hard disk is not present and failure is permanent
+                ifelse(communicationLink-failure-permanent)[
+                  if(B_CL-down = false)[
+                    set B_FM-next-waypoint 1  ; do we need to backtrack path or directly go to waypoint 1 ? Right now directly go to 1
+                    ask flightControl 8[
+                      fc-setUav-angle
+                    ]
+                  ]
+                  set B_CL-down true
+
+                ]
+                ;onboard hard disk is not present and failure is temporary
+                [
+                  set communicationLink-failure false
+                  set B_CL-down false
+                ]
+              ]
+            ]
+          ]
+
+          ;attempt transfering the image to ground only if communication link is up
+          if(communicationLink-failure = false)[
+            ask communicationLink 11[
+              send-image-to-ground
+            ]
+          ]
+        ]
 
       ]
     ]
@@ -227,6 +320,63 @@ to go
   ]
 
 end
+
+
+
+;this function raises the UAV up to search for communication link
+to raiseUp-and-find-commLink [commLinkFailedPermanently]
+  show "UAV rising up and hovering to find communication link"
+  set altitude (altitude + 10)
+  plot altitude
+  wait 3
+
+  ;if communication link is failed permanently then no point in flying at high altitude, come down
+  ifelse(commLinkFailedPermanently)[
+   show "Communication link not found, UAV coming down to noraml altitude"
+   set altitude (altitude - 10)
+   plot altitude
+  ]
+
+  ; if communication regained at high altitude then keep flying at that altitude
+  [
+   show "Communication link regained"
+  ]
+
+end
+
+
+;payload takes the image of surrounding
+to take-image
+
+  set image-count (image-count + 1)
+  set B_PL-image word "image " image-count
+
+end
+
+
+
+;payload sends the image to communication link
+to send-image-to-communicatioLink
+
+ set B_CL-image B_PL-image
+
+end
+
+
+; payload moves the image to onboard hard disk in case communication link fails
+to move-image-to-disk
+
+  show word B_PL-image " moved to onboard hard disk"
+end
+
+
+
+;communication link sends the image to ground control
+to send-image-to-ground
+
+  show word B_CL-image " sent to ground by onboard communication link agent"
+end
+
 
 
 
@@ -275,14 +425,11 @@ end
 
 
 ;CODE ENDS HERE -------------------+++++++++++++++++++++++------------------------------------------------
-
-
-
 @#$#@#$#@
 GRAPHICS-WINDOW
-510
+145
 10
-1205
+840
 726
 16
 16
@@ -324,10 +471,10 @@ NIL
 1
 
 BUTTON
-50
-368
-129
-401
+48
+326
+127
+359
 Go
 go
 NIL
@@ -339,6 +486,57 @@ NIL
 NIL
 NIL
 1
+
+SWITCH
+-1
+368
+140
+401
+onboard-disk-present
+onboard-disk-present
+1
+1
+-1000
+
+SWITCH
+-5
+402
+142
+435
+communicationLink-failure
+communicationLink-failure
+0
+1
+-1000
+
+SWITCH
+-9
+433
+143
+466
+communicationLink-failure-permanent
+communicationLink-failure-permanent
+0
+1
+-1000
+
+PLOT
+994
+178
+1240
+372
+UAV altitude
+time
+altitude
+0.0
+10.0
+0.0
+35.0
+true
+false
+"" ""
+PENS
+"altitude" 3.0 0 -16777216 true "" "plot altitude"
 
 @#$#@#$#@
 ## WHAT IS IT?
